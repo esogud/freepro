@@ -1,0 +1,24 @@
+name: Test Free Proxy
+
+on:
+  workflow_dispatch: # Manuel olarak tetiklemek için
+
+jobs:
+  run-script:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - name: Install dependencies
+        run: |
+          pip install free-proxy
+
+      - name: Run proxy script
+        run: |
+          python -c "from fp.fp import FreeProxy; print('Bulunan Proxy:', FreeProxy(https=True).get())"
