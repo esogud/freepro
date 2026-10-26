@@ -3,7 +3,7 @@ import random
 import re
 import string
 import time
-from concurrent.futures import ThreadPoolExecutor, as_completed
+from concurrent.futures import ThreadPoolExecutor
 from curl_cffi import requests
 from threading import local, Lock
 from fp.fp import FreeProxy
@@ -39,7 +39,6 @@ def get_fresh_working_proxy():
     """Web'den proxy toplar ve çalışan ilk proxy'yi bulup döner"""
     print("\n🔍 [PROXY ROTASYON] Web'den taze ve canlı proxy taranıyor...")
     
-    # Birden fazla ham proxy denemek için döngü
     for _ in range(15):
         try:
             p = FreeProxy(https=True).get()
@@ -49,14 +48,12 @@ def get_fresh_working_proxy():
         except Exception:
             pass
             
-    # Eğer serbest kütüphane bulamazsa acil durum için varsayılan boş bırakır veya tekrar dener
     print("⚠️ Anlık canlı proxy bulunamadı, tekrar deneniyor...")
     time.sleep(2)
     return get_fresh_working_proxy()
 
 def get_session():
     global active_proxy
-    # Eğer aktif proxy yoksa ilkini al
     if not active_proxy:
         active_proxy = get_fresh_working_proxy()
 
@@ -71,7 +68,6 @@ def get_session():
         thread_local.session = session
         thread_local.current_proxy = active_proxy
         
-        # Oturum başında ANA SAYFAYA SADECE 1 KEZ GİDİLİR ve token'lar önbelleğe alınır
         try:
             home_res = session.get("https://www.instagram.com/", timeout=10)
             csrftoken = session.cookies.get("csrftoken", domain=".instagram.com")
@@ -84,7 +80,8 @@ def get_session():
 
             lsd_match = re.search(r'"LSD",\[\],\{"token":"([^"]+)"\}', home_res.text)
             thread_local.lsd_token = lsd_match.group(1) if lsd_match else "default_lsd"
-        except Exception:
+        except Exception as e:
+            print(f"⚠️ [OTURUM UYARI] Ana sayfa token'ları alınamadı: {e}")
             thread_local.csrftoken = ""
             thread_local.lsd_token = "default_lsd"
             
@@ -102,12 +99,11 @@ def rotate_proxy_on_error(reason_msg=""):
     global active_proxy, stop_flag
     print(f"\n🔄 [PROXY ROTASYON] {reason_msg} Yeni çalışan proxy aranıyor...")
     active_proxy = get_fresh_working_proxy()
-    # Session önbelleğini sıfırla ki yeni proxy geçerli olsun
     if hasattr(thread_local, "session"):
         delattr(thread_local, "session")
     if hasattr(thread_local, "current_proxy"):
         delattr(thread_local, "current_proxy")
-    stop_flag = False  # Bayrağı sıfırla, yeni proxy ile devam et
+    stop_flag = False
 
 
 def auditor_worker(username, target_domain):
@@ -146,18 +142,25 @@ def auditor_worker(username, target_domain):
         }
 
         time.sleep(random.uniform(0.3, 0.9))
+        
+        # --- DEBUG LOGLAMA ---
+        print(f"📡 [İSTEK] Proxy: {active_proxy} | Hedef: {full_email}")
+        
         res = session.post(url, headers=headers, data=data, timeout=15)
+        
+        print(f"📥 [YANIT] Status Code: {res.status_code} | Raw İçerik (İlk 150 kr): {res.text[:150]}")
         
         try:
             res_json = res.json()
         except:
             res_json = {}
+            print(f"⚠️ [UYARI] {full_email} için dönen yanıt JSON formatında değil!")
 
         msg = str(res_json.get("message", ""))
         error_type = str(res_json.get("error_type", ""))
         status_code = res.status_code
         
-        # Engel veya hata durumları (Proxy patlamış veya rate-limit yemiş olabilir)
+        # Engel veya hata durumları
         if status_code not in (200, 400) or status_code in (403, 429) or "please wait" in msg.lower() or "limit" in msg.lower() or "feedback_required" in msg.lower():
             with lock:
                 if not stop_flag:
@@ -189,7 +192,7 @@ def auditor_worker(username, target_domain):
         return True, username
         
     except Exception as e:
-        # Bağlantı hatası durumunda proxy ölmüş demektir, rotasyonu tetikle
+        print(f"❌ [BAĞLANTI HATASI] Proxy düştü veya zaman aşımı: {e}")
         with lock:
             if not stop_flag:
                 stop_flag = True
@@ -198,9 +201,8 @@ def auditor_worker(username, target_domain):
 
 def main():
     global stop_flag
-    print("\n--- INSTAGRAM TARAMA MODÜLÜ (OTOMATİK WEB PROXY ROTASYONU) ---")
+    print("\n--- INSTAGRAM TARAMA MODÜLÜ (DEBUG MODU & OTOMATİK PROXY ROTASYONU) ---")
     
-    # GitHub Actions veya otomatik ortamlarda takılmaması için varsayılan değerler atanabilir
     target_domain = "mailnesia.com"
     prefix = ""
     suffix = ""
@@ -236,7 +238,7 @@ def main():
                     with lock:
                         batch_tested.append(scanned_u)
 
-            with ThreadPoolExecutor(max_workers=5) as executor:
+            with ThreadPoolExecutor(max_workers=3) as executor: # Test amaçlı worker sayısı dengelendi
                 executor.map(run_worker, found_users)
 
             if batch_tested:
