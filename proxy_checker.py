@@ -41,42 +41,27 @@ def test_proxy(proxy_str):
     return False
 
 def fetch_all_protocols_proxies():
-    """Proxifly GitHub listesinden ve alternatif kaynaklardan hızlıca hammadde proxy toplar"""
+    """Asla takılmayan, sadece en hızlı ve taze proxy'leri çeken hafif havuz"""
     raw_proxies = set()
     
-    # 1. Kaynak: Proxifly GitHub Repository (JSON Formatında güncel liste)
+    # 1. Hızlı Kaynak: ProxyScrape Sadece HTTP ve SOCKS5 (Doğrudan TXT formatı, anında gelir)
     try:
-        proxifly_url = "https://cdn.jsdelivr.net/gh/proxifly/free-proxy-list@main/proxies/all/data.json"
-        res = requests.get(proxifly_url, timeout=3)
-        if res.status_code == 200:
-            data = res.json()
-            for item in data:
-                protocol = item.get("protocol", "http").lower()
-                ip = item.get("ip")
-                port = item.get("port")
-                if ip and port:
-                    raw_proxies.add(f"{protocol}://{ip}:{port}")
-    except Exception as e:
-        print(f"⚠️ Proxifly API çekilirken hata: {e}")
-
-    # 2. Kaynak: ProxyScrape
-    try:
-        for proto in ["http", "socks4", "socks5"]:
-            url = f"https://api.proxyscrape.com/v2/?request=displayproxies&protocol={proto}&timeout=1500&country=all"
-            res = requests.get(url, timeout=1.5)
+        for proto in ["http", "socks5"]:
+            url = f"https://api.proxyscrape.com/v2/?request=displayproxies&protocol={proto}&timeout=1000&country=all"
+            res = requests.get(url, timeout=2)
             if res.status_code == 200:
                 for line in res.text.splitlines():
-                    if line.strip():
-                        raw_proxies.add(f"{proto}://{line.strip()}")
+                    p = line.strip()
+                    if p:
+                        raw_proxies.add(f"{proto}://{p}")
     except:
         pass
 
-    # 3. Kaynak: Free-Proxy
+    # 2. Hızlı Kaynak: Free-Proxy Kütüphanesi
     try:
-        for _ in range(3):
-            fp = FreeProxy(https=True).get()
-            if fp:
-                raw_proxies.add(fp)
+        fp = FreeProxy(https=True).get()
+        if fp:
+            raw_proxies.add(fp)
     except:
         pass
 
@@ -84,16 +69,13 @@ def fetch_all_protocols_proxies():
 
 def get_fresh_working_proxy():
     global failed_proxies
-    print("\n🔍 [HIZLI PROXY] Havuzdan ilk live proxy aranıyor...")
+    print("\n🔍 [HIZLI PROXY] En hızlı taze proxy aranıyor...")
     
     pool = fetch_all_protocols_proxies()
     
-    # Eğer havuz boş kalırsa veya API'ler yanıt vermezse kara listeyi sıfırla
     if not pool:
-        print("⚠️ Havuz boş döndü, kara liste sıfırlanıyor...")
-        with lock:
-            failed_proxies.clear()
-        time.sleep(1)
+        print("⚠️ Havuz boş döndü, tekrar deneniyor...")
+        time.sleep(0.5)
         return get_fresh_working_proxy()
 
     random.shuffle(pool)
@@ -103,23 +85,22 @@ def get_fresh_working_proxy():
             failed_proxies.clear()
         valid_pool = pool
 
-    # Sadece ilk 30 tanesini test et (Hızlı sonuç için havuz aramasını daraltıyoruz)
-    with ThreadPoolExecutor(max_workers=30) as executor:
-        future_to_proxy = {executor.submit(test_proxy, p): p for p in valid_pool[:30]}
+    # Tüm listeyi değil, SADECE İLK 15 tanesini paralel test et (Anında bulup geçmesi için)
+    with ThreadPoolExecutor(max_workers=15) as executor:
+        future_to_proxy = {executor.submit(test_proxy, p): p for p in valid_pool[:15]}
         for future in as_completed(future_to_proxy):
             proxy = future_to_proxy[future]
             try:
                 if future.result():
-                    print(f"⚡ [İLK LIVE PROXY BULUNDU] ---> {proxy}")
+                    print(f"⚡ [ANINDA BULUNDU] ---> {proxy}")
                     return proxy
             except:
                 pass
                 
-    # Eğer bu turda hiçbiri canlı çıkmazsa kara listeyi temizleyip hemen tekrar dene
-    print("⚠️ Bu turda canlı proxy bulunamadı, havuz yenileniyor...")
+    # Hiçbiri tutmazsa listeyi temizle ve hemen tekrar dene
     with lock:
         failed_proxies.clear()
-    time.sleep(1)
+    time.sleep(0.5)
     return get_fresh_working_proxy()
 
 # --- TARANANLARI YÜKLE ---
@@ -382,7 +363,7 @@ def auditor_worker(username, target_domain):
 
 def main():
     global stop_flag
-    print("\n--- INSTAGRAM KESİN DOĞRULAMALI HIZLI TARAMA MODÜLÜ ---")
+    print("\n--- INSTAGRAM KESİN DOĞRULAMALI ULTRA HIZLI TARAMA MODÜLÜ ---")
     
     target_domain = os.environ.get("TARGET_DOMAIN", "hi2.in")
     prefix = os.environ.get("PREFIX", "")
