@@ -7,7 +7,8 @@ import uuid
 import secrets
 import json
 from concurrent.futures import ThreadPoolExecutor, as_completed
-from curl_cffi import requests
+from curl_cffi import requests as curl_requests
+import requests as std_requests  # Takılma yapmayan güvenli standart requests
 from threading import local, Lock
 import httpx
 
@@ -31,20 +32,18 @@ IMPERSONATE_PROFILES = ["chrome119", "chrome120", "safari17_0", "edge101"]
 thread_local = local()
 
 def test_proxy(proxy_str):
-    """Proxy'nin canlı çalışıp çalışmadığını curl_cffi uyumlu şekilde çok kısa sürede test eder"""
+    """Standart ve güvenli requests ile proxy'yi test eder (Asla askıda kalmaz)"""
     try:
-        # curl_cffi için proxy string'i hem http hem https olarak doğrudan verilebilir
-        res = requests.get("https://httpbin.org/ip", proxies=proxy_str, timeout=3)
+        formatted_proxy = proxy_str if "://" in proxy_str else f"http://{proxy_str}"
+        proxies = {
+            "http": formatted_proxy,
+            "https": formatted_proxy
+        }
+        res = std_requests.get("https://httpbin.org/ip", proxies=proxies, timeout=2)
         if res.status_code == 200:
             return True
     except:
-        try:
-            # Alternatif sözlük formatı denemesi
-            res = requests.get("https://httpbin.org/ip", proxies={"http": proxy_str, "https": proxy_str}, timeout=3)
-            if res.status_code == 200:
-                return True
-        except:
-            pass
+        pass
     return False
 
 def load_proxies_from_file():
