@@ -3,7 +3,7 @@ import random
 import re
 import string
 import time
-from concurrent.futures import ThreadPoolExecutor
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from curl_cffi import requests
 from threading import local, Lock
 from fp.fp import FreeProxy
@@ -15,7 +15,7 @@ TARGET_CYCLE_LIMIT = 360
 
 # Global Değişkenler
 scanned_database = set()
-failed_proxies = set()  # Kara liste
+failed_proxies = set()
 lock = Lock()
 stop_flag = False
 active_proxy = None
@@ -27,81 +27,91 @@ IMPERSONATE_PROFILES = ["chrome119", "chrome120", "safari17_0", "edge101"]
 thread_local = local()
 
 def test_proxy(proxy_str):
-    """Bulunan proxy'nin çalışıp çalışmadığını test eder"""
+    """Proxy'nin (HTTP, HTTPS veya SOCKS) canlı çalışıp çalışmadığını test eder"""
     try:
-        res = requests.get("https://httpbin.org/ip", proxies={"http": proxy_str, "https": proxy_str}, timeout=4)
+        # Curl_cffi tüm protokolleri (http, https, socks4, socks5) destekler
+        res = requests.get("https://httpbin.org/ip", proxies={"http": proxy_str, "https": proxy_str}, timeout=2)
         if res.status_code == 200:
             return True
     except:
         pass
     return False
 
-def fetch_proxies_from_apis():
-    """Farklı açık kaynaklı API'lerden ve kütüphaneden ham proxy havuzu toplar"""
+def fetch_all_protocols_proxies():
+    """HTTP, HTTPS, SOCKS4 ve SOCKS5 protokollerini destekleyen devasa bir havuz toplar"""
     raw_proxies = set()
     
-    # 1. Kaynak: GeoNode Ücretsiz Proxy API
+    # 1. Kaynak: GeoNode (HTTP, HTTPS, SOCKS4, SOCKS5)
     try:
-        print("🌐 GeoNode API'den proxy'ler çekiliyor...")
-        geonode_url = "https://proxylist.geonode.com/api/proxy-list?limit=50&page=1&sort_by=lastChecked&sort_type=desc&protocols=http%2Chttps"
-        res = requests.get(geonode_url, timeout=5)
+        geonode_url = "https://proxylist.geonode.com/api/proxy-list?limit=50&page=1&sort_by=lastChecked&sort_type=desc"
+        res = requests.get(geonode_url, timeout=3)
         if res.status_code == 200:
-            data = res.json().get("data", [])
-            for item in data:
+            for item in res.json().get("data", []):
                 ip = item.get("ip")
                 port = item.get("port")
+                protocols = item.get("protocols", [])
                 if ip and port:
-                    raw_proxies.add(f"http://{ip}:{port}")
-    except Exception as e:
-        print(f"⚠️ GeoNode API hatası: {e}")
+                    for proto in protocols:
+                        # GeoNode'dan gelen protokollere göre URL formatı
+                        raw_proxies.add(f"{proto}://{ip}:{port}")
+    except:
+        pass
 
-    # 2. Kaynak: ProxyScrape API
+    # 2. Kaynak: ProxyScrape (HTTP, SOCKS4, SOCKS5)
     try:
-        print("🌐 ProxyScrape API'den proxy'ler çekiliyor...")
-        proxyscrape_url = "https://api.proxyscrape.com/v2/?request=displayproxies&protocol=http&timeout=5000&country=all&ssl=all"
-        res = requests.get(proxyscrape_url, timeout=5)
-        if res.status_code == 200:
-            lines = res.text.splitlines()
-            for line in lines:
-                p = line.strip()
-                if p:
-                    raw_proxies.add(f"http://{p}")
-    except Exception as e:
-        print(f"⚠️ ProxyScrape API hatası: {e}")
+        for proto in ["http", "socks4", "socks5"]:
+            url = f"https://api.proxyscrape.com/v2/?request=displayproxies&protocol={proto}&timeout=3000&country=all"
+            res = requests.get(url, timeout=3)
+            if res.status_code == 200:
+                for line in res.text.splitlines():
+                    p = line.strip()
+                    if p:
+                        raw_proxies.add(f"{proto}://{p}")
+    except:
+        pass
 
     # 3. Kaynak: Free-Proxy Kütüphanesi
     try:
-        print("🌐 Free-Proxy kütüphanesinden proxy aranıyor...")
-        for _ in range(5):
+        for _ in range(3):
             fp = FreeProxy(https=True).get()
             if fp:
                 raw_proxies.add(fp)
-    except Exception:
+    except:
         pass
 
     return list(raw_proxies)
 
 def get_fresh_working_proxy():
-    """Genişletilmiş havuzdan kara listede olmayan ve çalışan ilk proxy'yi seçer"""
+    """Genişletilmiş çoklu protokol havuzundan çalışan ilk proxy'yi paralel test ederek bulur"""
     global failed_proxies
-    print("\n🔍 [GENİŞLETİCİ] Çoklu kaynaklardan taze proxy havuzu derleniyor...")
+    print("\n🔍 [PROXY] Çoklu protokol (HTTP/SOCKS) havuzu taranıyor...")
     
-    pool = fetch_proxies_from_apis()
-    random.shuffle(pool)  # Listeyi karıştır ki hep aynı sırayla denenmesin
+    pool = fetch_all_protocols_proxies()
+    random.shuffle(pool)
     
-    print(f"📦 Toplam {len(pool)} adet ham proxy toplandı. Test ediliyor...")
+    # Sadece kara listede olmayanları seç
+    valid_pool = [p for p in pool if p not in failed_proxies]
+    if not valid_pool:
+        print("⚠️ Kara liste temizleniyor...")
+        with lock:
+            failed_proxies.clear()
+        valid_pool = pool
+
+    print(f"📦 Toplam {len(valid_pool)} adet ham proxy paralel test ediliyor...")
     
-    for p in pool:
-        if p not in failed_proxies:
-            if test_proxy(p):
-                print(f"✅ [YENİ AKTİF PROXY BULUNDU] ---> {p}")
-                return p
+    # ThreadPoolExecutor ile aynı anda (çok hızlı) test etme
+    with ThreadPoolExecutor(max_workers=15) as executor:
+        future_to_proxy = {executor.submit(test_proxy, p): p for p in valid_pool[:60]} # İlk 60 tanesini test et
+        for future in as_completed(future_to_proxy):
+            proxy = future_to_proxy[future]
+            try:
+                if future.result():
+                    print(f"✅ [CANLI PROXY BULUNDU] ---> {proxy}")
+                    return proxy
+            except:
+                pass
                 
-    # Eğer havuzdakilerin hepsi patladıysa kara listeyi temizleyip tekrar dene
-    print("⚠️ Havuzdaki tüm proxy'ler tükendi veya kara listede, kara liste sıfırlanıyor...")
-    with lock:
-        failed_proxies.clear()
-        
+    print("⚠️ Havuzdan çalışan bulunamadı, tekrar taranıyor...")
     time.sleep(2)
     return get_fresh_working_proxy()
 
@@ -155,7 +165,7 @@ def proxy_ip_reset(reason_msg=""):
             failed_proxies.add(active_proxy)
             print(f"🚫 [KARA LİSTE] Patlayan proxy eklendi: {active_proxy}")
 
-    print(f"\n📡 [PROXY ROTASYON] {reason_msg} Genişletilmiş havuzdan yeni proxy aranıyor...")
+    print(f"\n📡 [PROXY ROTASYON] {reason_msg} Çoklu protokol havuzundan yeni proxy aranıyor...")
     active_proxy = get_fresh_working_proxy()
     
     if hasattr(thread_local, "session"):
@@ -164,7 +174,7 @@ def proxy_ip_reset(reason_msg=""):
         delattr(thread_local, "current_proxy")
         
     stop_flag = False
-    print("🌐 Yeni farklı proxy aktif!")
+    print("🌐 Yeni farklı protokol proxy'si aktif!")
 
 
 def auditor_worker(username, target_domain):
@@ -253,7 +263,7 @@ def auditor_worker(username, target_domain):
 
 def main():
     global stop_flag
-    print("\n--- INSTAGRAM TARAMA MODÜLÜ (ÇOKLU API PROXY HAVUZU) ---")
+    print("\n--- INSTAGRAM TARAMA MODÜLÜ (ÇOKLU PROTOKOL SOCKS/HTTP) ---")
     
     target_domain = os.environ.get("TARGET_DOMAIN", "hi2.in")
     prefix = os.environ.get("PREFIX", "")
