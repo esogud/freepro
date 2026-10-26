@@ -1,10 +1,10 @@
-name: Test Free Proxy
+name: Live Proxy Checker
 
 on:
-  workflow_dispatch: # Manuel olarak tetiklemek için
+  workflow_dispatch: # Manuel çalıştırmak için
 
 jobs:
-  run-script:
+  run-checker:
     runs-on: ubuntu-latest
     steps:
       - name: Checkout repository
@@ -17,8 +17,8 @@ jobs:
 
       - name: Install dependencies
         run: |
-          pip install free-proxy
+          pip install free-proxy requests
 
-      - name: Run proxy script
+      - name: Run Proxy Script
         run: |
-          python -c "from fp.fp import FreeProxy; print('Bulunan Proxy:', FreeProxy(https=True).get())"
+          python proxy_checker.py
