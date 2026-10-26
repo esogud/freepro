@@ -41,17 +41,25 @@ def test_proxy(proxy_str):
     return False
 
 def fetch_all_protocols_proxies():
-    """Hızlı ve güvenli proxy toplama havuzu"""
+    """Proxifly GitHub listesinden ve alternatif kaynaklardan hızlıca hammadde proxy toplar"""
     raw_proxies = set()
     
+    # 1. Kaynak: Proxifly GitHub Repository (JSON Formatında güncel liste)
     try:
-        for _ in range(5):
-            fp = FreeProxy(https=True).get()
-            if fp:
-                raw_proxies.add(fp)
-    except:
-        pass
+        proxifly_url = "https://cdn.jsdelivr.net/gh/proxifly/free-proxy-list@main/proxies/all/data.json"
+        res = requests.get(proxifly_url, timeout=3)
+        if res.status_code == 200:
+            data = res.json()
+            for item in data:
+                protocol = item.get("protocol", "http").lower()
+                ip = item.get("ip")
+                port = item.get("port")
+                if ip and port:
+                    raw_proxies.add(f"{protocol}://{ip}:{port}")
+    except Exception as e:
+        print(f"⚠️ Proxifly API çekilirken hata: {e}")
 
+    # 2. Kaynak: ProxyScrape
     try:
         for proto in ["http", "socks4", "socks5"]:
             url = f"https://api.proxyscrape.com/v2/?request=displayproxies&protocol={proto}&timeout=1500&country=all"
@@ -63,12 +71,21 @@ def fetch_all_protocols_proxies():
     except:
         pass
 
+    # 3. Kaynak: Free-Proxy
+    try:
+        for _ in range(3):
+            fp = FreeProxy(https=True).get()
+            if fp:
+                raw_proxies.add(fp)
+    except:
+        pass
+
     return list(raw_proxies)
 
 def get_fresh_working_proxy():
-    """Asla takılmadan ilk canlı proxy'yi yakalayıp döner"""
+    """Havuzdan ilk yakaladığı çalışan live proxy ile anında başlar"""
     global failed_proxies
-    print("\n🔍 [HIZLI PROXY] Havuzdan ilk live proxy aranıyor...")
+    print("\n🔍 [HIZLI PROXY] Proxifly ve alternatif havuzdan ilk live proxy aranıyor...")
     
     pool = fetch_all_protocols_proxies()
     if not pool:
@@ -82,22 +99,25 @@ def get_fresh_working_proxy():
     random.shuffle(pool)
     valid_pool = [p for p in pool if p not in failed_proxies]
     if not valid_pool:
+        print("⚠️ Kara liste temizleniyor...")
         with lock:
             failed_proxies.clear()
         valid_pool = pool
 
+    # Paralel test ile İLK BULUNAN LIVE PROXY'DE DÖNGÜYÜ KIR VE DÖN
     with ThreadPoolExecutor(max_workers=25) as executor:
-        future_to_proxy = {executor.submit(test_proxy, p): p for p in valid_pool[:40]}
+        future_to_proxy = {executor.submit(test_proxy, p): p for p in valid_pool[:50]}
         for future in as_completed(future_to_proxy):
             proxy = future_to_proxy[future]
             try:
                 if future.result():
-                    print(f"⚡ [İLK LIVE PROXY BULUNDU] ---> {proxy}")
+                    print(f"⚡ [İLK LIVE PROXY YAKALANDI] ---> {proxy}")
                     return proxy
             except:
                 pass
                 
-    time.sleep(0.5)
+    print("⚠️ Anlık live proxy bulunamadı, kısa bir bekleme sonrası tekrar deneniyor...")
+    time.sleep(1)
     return get_fresh_working_proxy()
 
 # --- TARANANLARI YÜKLE ---
