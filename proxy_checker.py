@@ -198,7 +198,7 @@ def main():
     target_domain = "telegmail.com"
     prefix = ""
     suffix = ""
-    random_len = 5
+    random_len = 6
 
     while True:
         if not os.path.exists(INPUT_FILE):
