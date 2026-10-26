@@ -15,14 +15,15 @@ TARGET_CYCLE_LIMIT = 360
 
 # Global Değişkenler
 scanned_database = set()
+failed_proxies = set()  # Kara liste
 lock = Lock()
 stop_flag = False
-active_proxy = None  # O an kullanılan aktif proxy
+active_proxy = None
 
 # --- DİNAMİK TLS İMPERSONATE PROFİLLERİ ---
 IMPERSONATE_PROFILES = ["chrome119", "chrome120", "safari17_0", "edge101"]
 
-# --- THREAD-LOCAL SESSION VE TOKEN CACHE (ÖNBELLEKLEME) ---
+# --- THREAD-LOCAL SESSION VE TOKEN CACHE ---
 thread_local = local()
 
 def test_proxy(proxy_str):
@@ -35,18 +36,72 @@ def test_proxy(proxy_str):
         pass
     return False
 
+def fetch_proxies_from_apis():
+    """Farklı açık kaynaklı API'lerden ve kütüphaneden ham proxy havuzu toplar"""
+    raw_proxies = set()
+    
+    # 1. Kaynak: GeoNode Ücretsiz Proxy API
+    try:
+        print("🌐 GeoNode API'den proxy'ler çekiliyor...")
+        geonode_url = "https://proxylist.geonode.com/api/proxy-list?limit=50&page=1&sort_by=lastChecked&sort_type=desc&protocols=http%2Chttps"
+        res = requests.get(geonode_url, timeout=5)
+        if res.status_code == 200:
+            data = res.json().get("data", [])
+            for item in data:
+                ip = item.get("ip")
+                port = item.get("port")
+                if ip and port:
+                    raw_proxies.add(f"http://{ip}:{port}")
+    except Exception as e:
+        print(f"⚠️ GeoNode API hatası: {e}")
+
+    # 2. Kaynak: ProxyScrape API
+    try:
+        print("🌐 ProxyScrape API'den proxy'ler çekiliyor...")
+        proxyscrape_url = "https://api.proxyscrape.com/v2/?request=displayproxies&protocol=http&timeout=5000&country=all&ssl=all"
+        res = requests.get(proxyscrape_url, timeout=5)
+        if res.status_code == 200:
+            lines = res.text.splitlines()
+            for line in lines:
+                p = line.strip()
+                if p:
+                    raw_proxies.add(f"http://{p}")
+    except Exception as e:
+        print(f"⚠️ ProxyScrape API hatası: {e}")
+
+    # 3. Kaynak: Free-Proxy Kütüphanesi
+    try:
+        print("🌐 Free-Proxy kütüphanesinden proxy aranıyor...")
+        for _ in range(5):
+            fp = FreeProxy(https=True).get()
+            if fp:
+                raw_proxies.add(fp)
+    except Exception:
+        pass
+
+    return list(raw_proxies)
+
 def get_fresh_working_proxy():
-    """Web'den taze ve canlı proxy taranır"""
-    print("\n🔍 [PROXY] Web'den taze ve canlı proxy taranıyor...")
-    for _ in range(15):
-        try:
-            p = FreeProxy(https=True).get()
-            if p and test_proxy(p):
-                print(f"✅ [AKTİF PROXY BULUNDU] ---> {p}")
+    """Genişletilmiş havuzdan kara listede olmayan ve çalışan ilk proxy'yi seçer"""
+    global failed_proxies
+    print("\n🔍 [GENİŞLETİCİ] Çoklu kaynaklardan taze proxy havuzu derleniyor...")
+    
+    pool = fetch_proxies_from_apis()
+    random.shuffle(pool)  # Listeyi karıştır ki hep aynı sırayla denenmesin
+    
+    print(f"📦 Toplam {len(pool)} adet ham proxy toplandı. Test ediliyor...")
+    
+    for p in pool:
+        if p not in failed_proxies:
+            if test_proxy(p):
+                print(f"✅ [YENİ AKTİF PROXY BULUNDU] ---> {p}")
                 return p
-        except Exception:
-            pass
-    print("⚠️ Anlık canlı proxy bulunamadı, tekrar deneniyor...")
+                
+    # Eğer havuzdakilerin hepsi patladıysa kara listeyi temizleyip tekrar dene
+    print("⚠️ Havuzdaki tüm proxy'ler tükendi veya kara listede, kara liste sıfırlanıyor...")
+    with lock:
+        failed_proxies.clear()
+        
     time.sleep(2)
     return get_fresh_working_proxy()
 
@@ -66,7 +121,6 @@ def get_session():
         thread_local.session = session
         thread_local.current_proxy = active_proxy
         
-        # Oturum başında ANA SAYFAYA SADECE 1 KEZ GİDİLİR ve token'lar önbelleğe alınır
         try:
             home_res = session.get("https://www.instagram.com/", timeout=10)
             csrftoken = session.cookies.get("csrftoken", domain=".instagram.com")
@@ -94,16 +148,23 @@ if os.path.exists(SCANNED_FILE):
 
 
 def proxy_ip_reset(reason_msg=""):
-    global active_proxy, stop_flag
-    print(f"\n📡 [PROXY ROTASYON] {reason_msg} Yeni çalışan proxy aranıyor...")
+    global active_proxy, stop_flag, failed_proxies
+    
+    if active_proxy:
+        with lock:
+            failed_proxies.add(active_proxy)
+            print(f"🚫 [KARA LİSTE] Patlayan proxy eklendi: {active_proxy}")
+
+    print(f"\n📡 [PROXY ROTASYON] {reason_msg} Genişletilmiş havuzdan yeni proxy aranıyor...")
     active_proxy = get_fresh_working_proxy()
-    # Session önbelleğini sıfırla ki yeni proxy geçerli olsun
+    
     if hasattr(thread_local, "session"):
         delattr(thread_local, "session")
     if hasattr(thread_local, "current_proxy"):
         delattr(thread_local, "current_proxy")
+        
     stop_flag = False
-    print("🌐 Yeni proxy aktif ve bağlantı sağlandı!")
+    print("🌐 Yeni farklı proxy aktif!")
 
 
 def auditor_worker(username, target_domain):
@@ -119,7 +180,6 @@ def auditor_worker(username, target_domain):
     enc_password = f"#PWD_INSTAGRAM_BROWSER:0:{timestamp}:11111111"
     
     try:
-        # Önbelleğe alınan çerez ve token'lar doğrudan kullanılıyor
         csrftoken = getattr(thread_local, "csrftoken", "")
         lsd_token = getattr(thread_local, "lsd_token", "default_lsd")
 
@@ -142,7 +202,6 @@ def auditor_worker(username, target_domain):
             "trustedDeviceRecords": "{}"
         }
 
-        # İstekler arası dinamik insan benzeri gecikme
         time.sleep(random.uniform(0.3, 0.9))
         res = session.post(url, headers=headers, data=data, timeout=15)
         
@@ -155,7 +214,6 @@ def auditor_worker(username, target_domain):
         error_type = str(res_json.get("error_type", ""))
         status_code = res.status_code
         
-        # Engel veya hata durumları (403, 429, limit vb.)
         if status_code not in (200, 400) or status_code in (403, 429) or "please wait" in msg.lower() or "limit" in msg.lower() or "feedback_required" in msg.lower():
             with lock:
                 if not stop_flag:
@@ -187,7 +245,6 @@ def auditor_worker(username, target_domain):
         return True, username
         
     except Exception as e:
-        # Bağlantı kopması veya proxy düşmesi durumunda hata tetikle
         with lock:
             if not stop_flag:
                 stop_flag = True
@@ -196,20 +253,16 @@ def auditor_worker(username, target_domain):
 
 def main():
     global stop_flag
-    print("\n--- INSTAGRAM TARAMA MODÜLÜ (OTOMATİK / GİRDİSİZ MOD) ---")
+    print("\n--- INSTAGRAM TARAMA MODÜLÜ (ÇOKLU API PROXY HAVUZU) ---")
     
-    # GitHub Actions veya otomatik ortamlarda input sormaması için çevre değişkenlerinden okur
     target_domain = os.environ.get("TARGET_DOMAIN", "hi2.in")
     prefix = os.environ.get("PREFIX", "")
     suffix = os.environ.get("SUFFIX", "")
-    
     try:
         random_len = int(os.environ.get("RANDOM_LEN", "5"))
     except:
         random_len = 5
 
-    print(f"⚙️ [AYARLAR] Domain: {target_domain} | Ön Ek: {prefix} | Son Ek: {suffix} | Harf Sayısı: {random_len}")
-    
     abc = string.ascii_lowercase
 
     while True:
@@ -220,8 +273,6 @@ def main():
         stop_flag = False
         instagram_scanned_in_cycle = 0
         print(f"\n🔎 Tarama başlatıldı... (Her {TARGET_CYCLE_LIMIT} sorguda veya hata durumunda IP yenilenecek)")
-        
-        # ... (Döngünün geri kalanı tamamen aynı kalacaktır)
 
         while not stop_flag and instagram_scanned_in_cycle < TARGET_CYCLE_LIMIT:
             found_users = []
