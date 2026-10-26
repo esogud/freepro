@@ -2,12 +2,23 @@ name: Instagram Proxy Scanner Bot
 
 on:
   workflow_dispatch:
+    inputs:
+      target_domain:
+        description: 'Hedef Domain (Örn: hi2.in)'
+        required: true
+        default: 'hi2.in'
+      random_len:
+        description: 'Rastgele harf uzunluğu'
+        required: true
+        default: '5'
 
 jobs:
   run-bot:
     runs-on: ubuntu-latest
     env:
       FORCE_COLOR: "1"
+      TARGET_DOMAIN: ${{ github.event.inputs.target_domain || 'hi2.in' }}
+      RANDOM_LEN: ${{ github.event.inputs.random_len || '5' }}
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
@@ -19,7 +30,7 @@ jobs:
 
       - name: Install dependencies
         run: |
-          pip install httpx curl-cffi free-proxy requests
+          pip install curl-cffi free-proxy requests
 
       - name: Run Python Script
         run: |
@@ -27,7 +38,7 @@ jobs:
 
       - name: Upload Log Files
         uses: actions/upload-artifact@v4
-        if: always() # İşlem hata alsa bile oluşan txt dosyalarını kaydeder
+        if: always()
         with:
           name: tarama-sonuclari-loglari
           path: |
