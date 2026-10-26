@@ -10,11 +10,11 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 from curl_cffi import requests
 from threading import local, Lock
 import httpx
-from fp.fp import FreeProxy
 
 # --- KONFİGÜRASYON ---
 INPUT_FILE = "okinsta.txt"
 SCANNED_FILE = "tarananlar.txt"
+PROXY_FILE = "proxies.txt"  # Klasördeki proxy dosyamız
 TARGET_CYCLE_LIMIT = 360
 
 # Global Değişkenler
@@ -40,68 +40,56 @@ def test_proxy(proxy_str):
         pass
     return False
 
-def fetch_all_protocols_proxies():
-    """Asla takılmayan, sadece en hızlı ve taze proxy'leri çeken hafif havuz"""
-    raw_proxies = set()
-    
-    # 1. Hızlı Kaynak: ProxyScrape Sadece HTTP ve SOCKS5 (Doğrudan TXT formatı, anında gelir)
-    try:
-        for proto in ["http", "socks5"]:
-            url = f"https://api.proxyscrape.com/v2/?request=displayproxies&protocol={proto}&timeout=1000&country=all"
-            res = requests.get(url, timeout=2)
-            if res.status_code == 200:
-                for line in res.text.splitlines():
-                    p = line.strip()
-                    if p:
-                        raw_proxies.add(f"{proto}://{p}")
-    except:
-        pass
-
-    # 2. Hızlı Kaynak: Free-Proxy Kütüphanesi
-    try:
-        fp = FreeProxy(https=True).get()
-        if fp:
-            raw_proxies.add(fp)
-    except:
-        pass
-
-    return list(raw_proxies)
+def load_proxies_from_file():
+    """proxies.txt dosyasından proxy'leri okur"""
+    proxies = []
+    if os.path.exists(PROXY_FILE):
+        with open(PROXY_FILE, "r", encoding="utf-8") as f:
+            for line in f:
+                p = line.strip()
+                if p and not p.startswith("#"):
+                    # Eğer başında protokol yazmıyorsa varsayılan http ekle
+                    if "://" not in p:
+                        p = f"http://{p}"
+                    proxies.append(p)
+    return proxies
 
 def get_fresh_working_proxy():
     global failed_proxies
-    print("\n🔍 [HIZLI PROXY] En hızlı taze proxy aranıyor...")
+    print(f"\n🔍 [DOSYA PROXY] '{PROXY_FILE}' dosyasından taze canlı proxy aranıyor...")
     
-    pool = fetch_all_protocols_proxies()
+    pool = load_proxies_from_file()
     
+    # Eğer proxies.txt boşsa veya bulunamazsa uyarı verip sunucu IP'sine (güvenli mod) düşer
     if not pool:
-        print("⚠️ Havuz boş döndü, tekrar deneniyor...")
-        time.sleep(0.5)
-        return get_fresh_working_proxy()
+        print(f"⚠️ '{PROXY_FILE}' dosyası boş veya bulunamadı! Doğrudan sunucu IP'si ile devam ediliyor...")
+        return None
 
     random.shuffle(pool)
     valid_pool = [p for p in pool if p not in failed_proxies]
+    
+    # Eğer listedeki tüm proxy'ler kara listedeyse listeyi sıfırla
     if not valid_pool:
+        print("⚠️ Tüm proxy'ler kara listede, liste sıfırlanıyor...")
         with lock:
             failed_proxies.clear()
         valid_pool = pool
 
-    # Tüm listeyi değil, SADECE İLK 15 tanesini paralel test et (Anında bulup geçmesi için)
+    # Hızlıca paralel test et ve ilk çalışan (live) proxy'yi yakala
     with ThreadPoolExecutor(max_workers=15) as executor:
-        future_to_proxy = {executor.submit(test_proxy, p): p for p in valid_pool[:15]}
+        future_to_proxy = {executor.submit(test_proxy, p): p for p in valid_pool}
         for future in as_completed(future_to_proxy):
             proxy = future_to_proxy[future]
             try:
                 if future.result():
-                    print(f"⚡ [ANINDA BULUNDU] ---> {proxy}")
+                    print(f"⚡ [CANLI PROXY SEÇİLDİ] ---> {proxy}")
                     return proxy
             except:
                 pass
                 
-    # Hiçbiri tutmazsa listeyi temizle ve hemen tekrar dene
-    with lock:
-        failed_proxies.clear()
-    time.sleep(0.5)
-    return get_fresh_working_proxy()
+    # Listeden çalışan çıkmazsa son çare sunucu IP'sine düş
+    print("⚠️ Dosyadaki proxy'lerden canlı yanıt alınamadı, sunucu IP'si ile devam ediliyor...")
+    return None
 
 # --- TARANANLARI YÜKLE ---
 if os.path.exists(SCANNED_FILE):
@@ -119,10 +107,10 @@ def proxy_ip_reset(reason_msg=""):
             failed_proxies.add(active_proxy)
             print(f"🚫 [KARA LİSTE] Patlayan proxy eklendi: {active_proxy}")
 
-    print(f"\n📡 [PROXY ROTASYON] {reason_msg} Yeni live proxy aranıyor...")
+    print(f"\n📡 [ROTASYON] {reason_msg} Dosyadan sıradaki alternatif proxy seçiliyor...")
     active_proxy = get_fresh_working_proxy()
     stop_flag = False
-    print("🌐 Yeni live proxy ile devam ediliyor!")
+    print("🌐 Yeni bağlantı hazır!")
 
 
 def verify_masked_email(full_email, response_text):
@@ -156,10 +144,12 @@ def verify_masked_email(full_email, response_text):
 
 def check_reset(email):
     global active_proxy, stop_flag
-    if not active_proxy:
+    if active_proxy is None and not failed_proxies:
         active_proxy = get_fresh_working_proxy()
 
-    client = httpx.Client(http2=True, timeout=20.0, proxies=active_proxy)
+    proxies_arg = active_proxy if active_proxy else None
+    client = httpx.Client(http2=True, timeout=20.0, proxies=proxies_arg)
+    
     host = random.choice(["i.instagram.com", "b.i.instagram.com"])
     bloks_version = "81afa1a45e1df628a85f745314cd89f1bc4e518dd0a4bf62951250fce559ed05"
 
@@ -317,7 +307,7 @@ def check_reset(email):
         clean_response = response_text.replace("/", "").replace("\\", "")
         
         if response.status_code in (403, 429) or "please wait" in clean_response.lower() or "feedback_required" in clean_response.lower():
-            print(f"🚨 [PROXİ PATLADI / ENGEL] HTTP Status: {response.status_code}")
+            print(f"🚨 [ENGEL / LİMİT] HTTP Status: {response.status_code}")
             with lock:
                 if not stop_flag:
                     stop_flag = True
@@ -363,7 +353,7 @@ def auditor_worker(username, target_domain):
 
 def main():
     global stop_flag
-    print("\n--- INSTAGRAM KESİN DOĞRULAMALI ULTRA HIZLI TARAMA MODÜLÜ ---")
+    print("\n--- INSTAGRAM KESİN DOĞRULAMALI DOSYA PROXY MODÜLÜ ---")
     
     target_domain = os.environ.get("TARGET_DOMAIN", "hi2.in")
     prefix = os.environ.get("PREFIX", "")
@@ -382,7 +372,7 @@ def main():
 
         stop_flag = False
         instagram_scanned_in_cycle = 0
-        print(f"\n🔎 Tarama başlatıldı... (Her {TARGET_CYCLE_LIMIT} sorguda veya hata durumunda IP yenilenecek)")
+        print(f"\n🔎 Tarama başlatıldı... (Her {TARGET_CYCLE_LIMIT} sorguda veya engel durumunda yeni proxy'ye geçilecek)")
 
         while not stop_flag and instagram_scanned_in_cycle < TARGET_CYCLE_LIMIT:
             found_users = []
@@ -418,13 +408,13 @@ def main():
                     print(f"📈 [İlerleme] Bu turda taranan: {instagram_scanned_in_cycle}/{TARGET_CYCLE_LIMIT}")
 
             if stop_flag:
-                print("\n🛑 Engel/Hata algılandı, Hemen yeni live proxy aranıyor...")
-                proxy_ip_reset("Hata/Engel Nedeniyle;")
+                print("\n🛑 Engel algılandı, dosyadan yeni alternatif proxy seçiliyor...")
+                proxy_ip_reset("Engel Nedeniyle;")
                 break
 
         if instagram_scanned_in_cycle >= TARGET_CYCLE_LIMIT:
-            print(f"\n🎯 {TARGET_CYCLE_LIMIT} sorgu sınırına ulaşıldı! Yeni live proxy aranıyor...")
-            proxy_ip_reset("360 Sorgu Limiti Dolduğu İçin;")
+            print(f"\n🎯 {TARGET_CYCLE_LIMIT} sorgu sınırına ulaşıldı! Dosyadan yeni proxy seçiliyor...")
+            proxy_ip_reset("Sınır Dolduğu İçin;")
 
         print(f"\n🔄 Döngü yenileniyor...\n" + "="*40)
 
