@@ -31,17 +31,24 @@ IMPERSONATE_PROFILES = ["chrome119", "chrome120", "safari17_0", "edge101"]
 thread_local = local()
 
 def test_proxy(proxy_str):
-    """Proxy'nin canlı çalışıp çalışmadığını çok kısa sürede test eder"""
+    """Proxy'nin canlı çalışıp çalışmadığını curl_cffi uyumlu şekilde çok kısa sürede test eder"""
     try:
-        res = requests.get("https://httpbin.org/ip", proxies={"http": proxy_str, "https": proxy_str}, timeout=2)
+        # curl_cffi için proxy string'i hem http hem https olarak doğrudan verilebilir
+        res = requests.get("https://httpbin.org/ip", proxies=proxy_str, timeout=3)
         if res.status_code == 200:
             return True
     except:
-        pass
+        try:
+            # Alternatif sözlük formatı denemesi
+            res = requests.get("https://httpbin.org/ip", proxies={"http": proxy_str, "https": proxy_str}, timeout=3)
+            if res.status_code == 200:
+                return True
+        except:
+            pass
     return False
 
 def load_proxies_from_file():
-    """proxies.txt dosyasından proxy'leri okur"""
+    """proxies.txt dosyasından proxy'leri güvenli şekilde okur"""
     proxies = []
     if os.path.exists(PROXY_FILE):
         with open(PROXY_FILE, "r", encoding="utf-8") as f:
@@ -74,9 +81,9 @@ def get_fresh_working_proxy():
 
     # Sıralı (Linear) test mantığı - Asla askıda kalmaz, ölü olanı anında atlar
     for proxy in valid_pool:
-        print(f"testing proxy: {proxy} ...", end="\r")
+        print(f"Testing proxy: {proxy} ...")
         if test_proxy(proxy):
-            print(f"\n⚡ [CANLI PROXY BULUNDU] ---> {proxy}")
+            print(f"⚡ [CANLI PROXY BULUNDU] ---> {proxy}")
             return proxy
             
     print("\n⚠️ Dosyadaki hiçbir proxy'den canlı yanıt alınamadı, sunucu IP'si ile devam ediliyor...")
@@ -393,7 +400,7 @@ def main():
                 with lock:
                     with open(SCANNED_FILE, "a", encoding="utf-8") as f:
                         for u in batch_tested:
-                    vals = f.write(u + "\n")
+                            f.write(u + "\n")
                             scanned_database.add(u)
                     instagram_scanned_in_cycle += len(batch_tested)
                     print(f"📈 [İlerleme] Bu turda taranan: {instagram_scanned_in_cycle}/{TARGET_CYCLE_LIMIT}")
