@@ -321,7 +321,7 @@ def main():
     target_domain = "hi2.in"
     prefix = ""
     suffix = ""
-    random_len = 5
+    random_len = 7
 
     while True:
         if not os.path.exists(INPUT_FILE):
