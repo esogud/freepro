@@ -1,11 +1,13 @@
 name: Instagram Proxy Scanner Bot
 
 on:
-  workflow_dispatch: # GitHub arayüzünden manuel başlatmak için
+  workflow_dispatch:
 
 jobs:
   run-bot:
     runs-on: ubuntu-latest
+    env:
+      FORCE_COLOR: "1"
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
@@ -22,3 +24,12 @@ jobs:
       - name: Run Python Script
         run: |
           python proxy_checker.py
+
+      - name: Upload Log Files
+        uses: actions/upload-artifact@v4
+        if: always() # İşlem hata alsa bile oluşan txt dosyalarını kaydeder
+        with:
+          name: tarama-sonuclari-loglari
+          path: |
+            okinsta.txt
+            tarananlar.txt
