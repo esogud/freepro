@@ -1,10 +1,10 @@
-name: Live Proxy Checker
+name: Instagram Proxy Scanner Bot
 
 on:
-  workflow_dispatch: # Manuel çalıştırmak için
+  workflow_dispatch: # GitHub arayüzünden manuel başlatmak için
 
 jobs:
-  run-checker:
+  run-bot:
     runs-on: ubuntu-latest
     steps:
       - name: Checkout repository
@@ -17,8 +17,8 @@ jobs:
 
       - name: Install dependencies
         run: |
-          pip install free-proxy requests
+          pip install curl-cffi free-proxy requests
 
-      - name: Run Proxy Script
+      - name: Run Python Script
         run: |
           python proxy_checker.py
