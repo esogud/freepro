@@ -83,40 +83,42 @@ def fetch_all_protocols_proxies():
     return list(raw_proxies)
 
 def get_fresh_working_proxy():
-    """Havuzdan ilk yakaladığı çalışan live proxy ile anında başlar"""
     global failed_proxies
-    print("\n🔍 [HIZLI PROXY] Proxifly ve alternatif havuzdan ilk live proxy aranıyor...")
+    print("\n🔍 [HIZLI PROXY] Havuzdan ilk live proxy aranıyor...")
     
     pool = fetch_all_protocols_proxies()
+    
+    # Eğer havuz boş kalırsa veya API'ler yanıt vermezse kara listeyi sıfırla
     if not pool:
-        try:
-            fp = FreeProxy(https=True).get()
-            if fp:
-                pool.add(fp)
-        except:
-            pass
+        print("⚠️ Havuz boş döndü, kara liste sıfırlanıyor...")
+        with lock:
+            failed_proxies.clear()
+        time.sleep(1)
+        return get_fresh_working_proxy()
 
     random.shuffle(pool)
     valid_pool = [p for p in pool if p not in failed_proxies]
     if not valid_pool:
-        print("⚠️ Kara liste temizleniyor...")
         with lock:
             failed_proxies.clear()
         valid_pool = pool
 
-    # Paralel test ile İLK BULUNAN LIVE PROXY'DE DÖNGÜYÜ KIR VE DÖN
-    with ThreadPoolExecutor(max_workers=25) as executor:
-        future_to_proxy = {executor.submit(test_proxy, p): p for p in valid_pool[:50]}
+    # Sadece ilk 30 tanesini test et (Hızlı sonuç için havuz aramasını daraltıyoruz)
+    with ThreadPoolExecutor(max_workers=30) as executor:
+        future_to_proxy = {executor.submit(test_proxy, p): p for p in valid_pool[:30]}
         for future in as_completed(future_to_proxy):
             proxy = future_to_proxy[future]
             try:
                 if future.result():
-                    print(f"⚡ [İLK LIVE PROXY YAKALANDI] ---> {proxy}")
+                    print(f"⚡ [İLK LIVE PROXY BULUNDU] ---> {proxy}")
                     return proxy
             except:
                 pass
                 
-    print("⚠️ Anlık live proxy bulunamadı, kısa bir bekleme sonrası tekrar deneniyor...")
+    # Eğer bu turda hiçbiri canlı çıkmazsa kara listeyi temizleyip hemen tekrar dene
+    print("⚠️ Bu turda canlı proxy bulunamadı, havuz yenileniyor...")
+    with lock:
+        failed_proxies.clear()
     time.sleep(1)
     return get_fresh_working_proxy()
 
@@ -176,7 +178,6 @@ def check_reset(email):
     if not active_proxy:
         active_proxy = get_fresh_working_proxy()
 
-    # Httpx client'a aktif proxy'yi entegre ediyoruz
     client = httpx.Client(http2=True, timeout=20.0, proxies=active_proxy)
     host = random.choice(["i.instagram.com", "b.i.instagram.com"])
     bloks_version = "81afa1a45e1df628a85f745314cd89f1bc4e518dd0a4bf62951250fce559ed05"
