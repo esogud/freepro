@@ -31,7 +31,7 @@ jobs:
       - name: Install dependencies
         run: |
           pip install --upgrade pip
-          pip install curl-cffi free-proxy requests
+          pip install httpx curl-cffi free-proxy requests
 
       - name: Run Python Script
         run: |
