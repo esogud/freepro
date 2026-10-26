@@ -6,7 +6,6 @@ import time
 import uuid
 import secrets
 import json
-from concurrent.futures import ThreadPoolExecutor, as_completed
 from curl_cffi import requests
 from threading import local, Lock
 import httpx
@@ -48,7 +47,6 @@ def load_proxies_from_file():
             for line in f:
                 p = line.strip()
                 if p and not p.startswith("#"):
-                    # Eğer başında protokol yazmıyorsa varsayılan http ekle
                     if "://" not in p:
                         p = f"http://{p}"
                     proxies.append(p)
@@ -56,39 +54,31 @@ def load_proxies_from_file():
 
 def get_fresh_working_proxy():
     global failed_proxies
-    print(f"\n🔍 [DOSYA PROXY] '{PROXY_FILE}' dosyasından taze canlı proxy aranıyor...")
+    print(f"\n🔍 [DOSYA PROXY] '{PROXY_FILE}' dosyasından proxy'ler sırayla test ediliyor...")
     
     pool = load_proxies_from_file()
     
-    # Eğer proxies.txt boşsa veya bulunamazsa uyarı verip sunucu IP'sine (güvenli mod) düşer
     if not pool:
-        print(f"⚠️ '{PROXY_FILE}' dosyası boş veya bulunamadı! Doğrudan sunucu IP'si ile devam ediliyor...")
+        print(f"⚠️ '{PROXY_FILE}' dosyası boş veya bulunamadı! Sunucu IP'si ile devam ediliyor...")
         return None
 
     random.shuffle(pool)
     valid_pool = [p for p in pool if p not in failed_proxies]
     
-    # Eğer listedeki tüm proxy'ler kara listedeyse listeyi sıfırla
     if not valid_pool:
         print("⚠️ Tüm proxy'ler kara listede, liste sıfırlanıyor...")
         with lock:
             failed_proxies.clear()
         valid_pool = pool
 
-    # Hızlıca paralel test et ve ilk çalışan (live) proxy'yi yakala
-    with ThreadPoolExecutor(max_workers=15) as executor:
-        future_to_proxy = {executor.submit(test_proxy, p): p for p in valid_pool}
-        for future in as_completed(future_to_proxy):
-            proxy = future_to_proxy[future]
-            try:
-                if future.result():
-                    print(f"⚡ [CANLI PROXY SEÇİLDİ] ---> {proxy}")
-                    return proxy
-            except:
-                pass
-                
-    # Listeden çalışan çıkmazsa son çare sunucu IP'sine düş
-    print("⚠️ Dosyadaki proxy'lerden canlı yanıt alınamadı, sunucu IP'si ile devam ediliyor...")
+    # Sıralı (Linear) test mantığı - Asla askıda kalmaz, ölü olanı anında atlar
+    for proxy in valid_pool:
+        print(f"testing proxy: {proxy} ...", end="\r")
+        if test_proxy(proxy):
+            print(f"\n⚡ [CANLI PROXY BULUNDU] ---> {proxy}")
+            return proxy
+            
+    print("\n⚠️ Dosyadaki hiçbir proxy'den canlı yanıt alınamadı, sunucu IP'si ile devam ediliyor...")
     return None
 
 # --- TARANANLARI YÜKLE ---
